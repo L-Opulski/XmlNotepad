@@ -57,6 +57,11 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           Set-Content -Path .\src\Model\ApiKey.cs -Value 'namespace XmlNotepad { public partial class AppAnalytics { private const string ApiKey=""; } }'
+          msbuild .\src\xmlnotepad.sln /t:Build /p:Configuration=Release "/p:Platform=Any CPU" /verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { throw 'Release solution build failed.' }
+          foreach ($prerequisite in @('.\src\FontBuilder\bin\Release\FontBuilder.dll', '.\src\XmlStats\bin\Release\XmlStats.exe')) {
+            if (-not (Test-Path -LiteralPath $prerequisite -PathType Leaf)) { throw "Missing packaging prerequisite: $prerequisite" }
+          }
           msbuild .\src\XmlNotepadPackage\XmlNotepadPackage.wapproj /t:Build /p:Configuration=Release /p:Platform=AnyCPU /p:GenerateAppxPackageOnBuild=true /p:AppxBundle=Always /p:UapAppxPackageBuildMode=SideloadOnly /p:AppxPackageSigningEnabled=true "/p:PackageCertificateThumbprint=$env:MSIX_CERT_THUMBPRINT" /verbosity:minimal
           if ($LASTEXITCODE -ne 0) { throw 'MSIX package build failed.' }
 
