@@ -86,7 +86,7 @@ jobs:
           $output = Join-Path $env:RUNNER_TEMP 'app-attach'
           New-Item -ItemType Directory -Path $output -Force | Out-Null
           $image = Join-Path $output 'XmlNotepad.vhdx'
-          & $executables[0].FullName -Unpack -packagePath $bundle.FullName -destination $image -applyACLs -create -fileType vhdx -rootDirectory apps -quietUX
+          & $executables[0].FullName -Unpack -packagePath $bundle.FullName -destination $image -applyACLs -create -fileType vhdx -rootDirectory apps
           if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $image)) { throw 'MSIXMGR did not create the VHDX image.' }
           if ((Get-Item -LiteralPath $image).Length -eq 0) { throw 'MSIXMGR produced an empty VHDX image.' }
           Copy-Item -LiteralPath $bundle.FullName -Destination $output
