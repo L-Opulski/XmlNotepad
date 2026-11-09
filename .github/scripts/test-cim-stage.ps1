@@ -14,13 +14,24 @@ $mounted = $false
 $staged = $false
 $packageFullName = $null
 try {
-    & $MsixMgrPath -MountImage -imagePath $ImagePath -fileType CIM
-    if ($LASTEXITCODE -ne 0) { throw 'Failed to mount the new CIM image.' }
+    $mountOutput = @(& $MsixMgrPath -MountImage -imagePath $ImagePath -fileType CIM 2>&1)
+    if ($LASTEXITCODE -ne 0) { throw "Failed to mount the new CIM image: $($mountOutput -join ' ')" }
     $mounted = $true
 
     $newVolumes = @(Get-Volume | Where-Object { $_.UniqueId -and $before -notcontains $_.UniqueId })
-    if ($newVolumes.Count -ne 1) { throw "Expected one new CIM volume; found $($newVolumes.Count)." }
-    $deviceId = $newVolumes[0].UniqueId
+    if ($newVolumes.Count -eq 1) {
+        $deviceId = $newVolumes[0].UniqueId
+    }
+    else {
+        $volumeId = [regex]::Match(($mountOutput -join ' '), '(?i)\\\\\?\\Volume\{([0-9a-f-]{36})\}\\?')
+        if (-not $volumeId.Success) {
+            $volumeId = [regex]::Match(($mountOutput -join ' '), '(?i)\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b')
+        }
+        if (-not $volumeId.Success) {
+            throw "Cannot identify mounted CIM volume. MSIXMGR output: $($mountOutput -join ' ')"
+        }
+        $deviceId = '\\?\Volume{' + $volumeId.Groups[1].Value + '}\'
+    }
     if ($deviceId -notmatch '^\\\\\?\\Volume\{[0-9a-fA-F-]{36}\}\\$') {
         throw "Unexpected CIM volume path: $deviceId"
     }
