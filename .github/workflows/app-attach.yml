@@ -56,20 +56,43 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          trap {
+            $message = $_.Exception.Message.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Output "::error title=MSIX build::$message"
+            break
+          }
+          function Assert-BuildSucceeded($exitCode, $log, $label) {
+            if ($exitCode -eq 0) { return }
+            if (Test-Path -LiteralPath $log) {
+              Select-String -LiteralPath $log -Pattern ': error |error (MSB|CS|NETSDK|APPX|PRI|MC|NU)\d+' |
+                Select-Object -Last 8 | ForEach-Object {
+                  $message = $_.Line.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+                  Write-Output "::error title=$label::$message"
+                }
+            }
+            throw "$label failed with exit code $exitCode."
+          }
           Set-Content -Path .\src\Model\ApiKey.cs -Value 'namespace XmlNotepad { public partial class AppAnalytics { private const string ApiKey=""; } }'
-          msbuild .\src\xmlnotepad.sln /t:Build /p:Configuration=Release "/p:Platform=Any CPU" /verbosity:minimal
-          if ($LASTEXITCODE -ne 0) { throw 'Release solution build failed.' }
+          $solutionLog = Join-Path $env:RUNNER_TEMP 'solution-build.log'
+          msbuild .\src\xmlnotepad.sln /t:Build /p:Configuration=Release "/p:Platform=Any CPU" /verbosity:minimal "/flp:logfile=$solutionLog;verbosity=normal"
+          Assert-BuildSucceeded $LASTEXITCODE $solutionLog 'Release solution build'
           foreach ($prerequisite in @('.\src\FontBuilder\bin\Release\FontBuilder.dll', '.\src\XmlStats\bin\Release\XmlStats.exe')) {
             if (-not (Test-Path -LiteralPath $prerequisite -PathType Leaf)) { throw "Missing packaging prerequisite: $prerequisite" }
           }
-          msbuild .\src\XmlNotepadPackage\XmlNotepadPackage.wapproj /t:Build /p:Configuration=Release /p:Platform=AnyCPU /p:GenerateAppxPackageOnBuild=true /p:AppxBundle=Always /p:UapAppxPackageBuildMode=SideloadOnly /p:AppxPackageSigningEnabled=true "/p:PackageCertificateThumbprint=$env:MSIX_CERT_THUMBPRINT" /verbosity:minimal
-          if ($LASTEXITCODE -ne 0) { throw 'MSIX package build failed.' }
+          $packageLog = Join-Path $env:RUNNER_TEMP 'package-build.log'
+          msbuild .\src\XmlNotepadPackage\XmlNotepadPackage.wapproj /t:Build /p:Configuration=Release /p:Platform=AnyCPU /p:GenerateAppxPackageOnBuild=true /p:AppxBundle=Always /p:UapAppxPackageBuildMode=SideloadOnly /p:AppxPackageSigningEnabled=true "/p:PackageCertificateThumbprint=$env:MSIX_CERT_THUMBPRINT" /verbosity:minimal "/flp:logfile=$packageLog;verbosity=normal"
+          Assert-BuildSucceeded $LASTEXITCODE $packageLog 'MSIX package build'
 
       - name: Create App Attach CIM from signed MSIX bundle
         id: image
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          trap {
+            $message = $_.Exception.Message.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Output "::error title=CIM packaging::$message"
+            break
+          }
           $bundles = @(Get-ChildItem 'src/XmlNotepadPackage/AppPackages' -Recurse -File -Filter '*.msixbundle')
           if ($bundles.Count -ne 1) { throw "Expected one MSIX bundle; found $($bundles.Count)." }
           $bundle = $bundles[0]
@@ -143,10 +166,17 @@ jobs:
           PACKAGE_PUBLISHER: ${{ steps.image.outputs.publisher }}
           PACKAGE_NAME: ${{ steps.image.outputs.packageName }}
         run: |
-          & .\.github\scripts\test-cim-stage.ps1 -ImagePath $env:CIM_PATH `
-            -MsixMgrPath $env:MSIXMGR_PATH `
-            -ExpectedPublisher $env:PACKAGE_PUBLISHER `
-            -ExpectedPackageName $env:PACKAGE_NAME
+          try {
+            & .\.github\scripts\test-cim-stage.ps1 -ImagePath $env:CIM_PATH `
+              -MsixMgrPath $env:MSIXMGR_PATH `
+              -ExpectedPublisher $env:PACKAGE_PUBLISHER `
+              -ExpectedPackageName $env:PACKAGE_NAME
+          }
+          catch {
+            $message = $_.Exception.Message.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Output "::error title=CIM staging::$message"
+            throw
+          }
 
       - name: Upload signed bundle and complete App Attach CIM
         uses: actions/upload-artifact@v4
