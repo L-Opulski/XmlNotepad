@@ -31,3 +31,14 @@ See [Change History](http://microsoft.github.io/XmlNotepad/help/updates/) for a 
 ## Help
 
 See [Help Pages](http://microsoft.github.io/XmlNotepad).
+
+## Build an App Attach image (fork)
+
+The [App Attach workflow](.github/workflows/app-attach.yml) builds a signed MSIX bundle from the packaging project, then creates a VHDX image using Microsoft's MSIXMGR. It runs on changes to `src/` on `master`, or manually with **Run workflow** on a selected branch. Enable GitHub Actions on your fork before running it.
+
+Configure these GitHub Actions repository secrets first:
+
+- `MSIX_PFX_BASE64`: Base64-encoded PFX containing your MSIX code-signing certificate and private key (for example, `[Convert]::ToBase64String([IO.File]::ReadAllBytes('signing.pfx'))` in PowerShell). Never commit the PFX.
+- `MSIX_PFX_PASSWORD`: Password for that PFX.
+
+The workflow replaces the package manifest's publisher **in the runner only** with the signing certificate's subject, leaving the upstream publisher untouched in Git. The resulting package has a different publisher identity from Microsoft's release. Session hosts must trust the signing certificate and be able to read the VHDX from an SMB share. The workflow uploads the signed `.msixbundle`, `.vhdx`, and SHA-256 checksums as a GitHub Actions artifact retained for 14 days; it does **not** publish the image to a share or register it in Azure Virtual Desktop. Follow the [App Attach setup instructions](https://learn.microsoft.com/en-us/azure/virtual-desktop/app-attach-setup) after validating the image on an equivalent Windows session host. VHDX is used for compatibility across Windows 10 and Windows 11 hosts.

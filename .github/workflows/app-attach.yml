@@ -1,0 +1,100 @@
+name: Build XML Notepad App Attach image
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths:
+      - 'src/**'
+      - '.github/workflows/app-attach.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  package-and-image:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: NuGet/setup-nuget@v4
+      - uses: microsoft/setup-msbuild@v3
+
+      - name: Import signing certificate and match package publisher
+        shell: pwsh
+        env:
+          MSIX_PFX_BASE64: ${{ secrets.MSIX_PFX_BASE64 }}
+          MSIX_PFX_PASSWORD: ${{ secrets.MSIX_PFX_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:MSIX_PFX_BASE64 -or -not $env:MSIX_PFX_PASSWORD) {
+            throw 'Configure MSIX_PFX_BASE64 and MSIX_PFX_PASSWORD as repository secrets before building.'
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP 'xmlnotepad-signing.pfx'
+          try {
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:MSIX_PFX_BASE64))
+            $password = ConvertTo-SecureString $env:MSIX_PFX_PASSWORD -AsPlainText -Force
+            $certificate = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
+            if (-not $certificate -or -not $certificate.HasPrivateKey) {
+              throw 'The signing PFX must contain a certificate and its private key.'
+            }
+            $manifestPath = 'src/XmlNotepadPackage/Package.appxmanifest'
+            [xml]$manifest = Get-Content -LiteralPath $manifestPath -Raw
+            $manifest.Package.Identity.Publisher = $certificate.Subject
+            $manifest.Save((Join-Path $PWD $manifestPath))
+            "MSIX_CERT_THUMBPRINT=$($certificate.Thumbprint)" >> $env:GITHUB_ENV
+          }
+          finally {
+            Remove-Item -LiteralPath $pfx -ErrorAction SilentlyContinue
+          }
+
+      - name: Restore dependencies
+        shell: pwsh
+        run: nuget restore .\src\xmlnotepad.sln
+
+      - name: Build and sign MSIX bundle
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Content -Path .\src\Model\ApiKey.cs -Value 'namespace XmlNotepad { public partial class AppAnalytics { private const string ApiKey=""; } }'
+          msbuild .\src\XmlNotepadPackage\XmlNotepadPackage.wapproj /t:Build /p:Configuration=Release /p:Platform=AnyCPU /p:GenerateAppxPackageOnBuild=true /p:AppxBundle=Always /p:UapAppxPackageBuildMode=SideloadOnly /p:AppxPackageSigningEnabled=true "/p:PackageCertificateThumbprint=$env:MSIX_CERT_THUMBPRINT" /verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { throw 'MSIX package build failed.' }
+
+      - name: Create App Attach VHDX from signed MSIX bundle
+        id: image
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bundles = @(Get-ChildItem 'src/XmlNotepadPackage/AppPackages' -Recurse -File -Filter '*.msixbundle')
+          if ($bundles.Count -ne 1) { throw "Expected one MSIX bundle; found $($bundles.Count)." }
+          $bundle = $bundles[0]
+          $signature = Get-AuthenticodeSignature -LiteralPath $bundle.FullName
+          if (-not $signature.SignerCertificate -or $signature.SignerCertificate.Thumbprint -ne $env:MSIX_CERT_THUMBPRINT) {
+            throw 'The produced bundle is not signed with the configured certificate.'
+          }
+          $zip = Join-Path $env:RUNNER_TEMP 'msixmgr.zip'
+          $tools = Join-Path $env:RUNNER_TEMP 'msixmgr'
+          Invoke-WebRequest 'https://aka.ms/msixmgr' -OutFile $zip
+          Expand-Archive -LiteralPath $zip -DestinationPath $tools
+          $executables = @(Get-ChildItem $tools -Recurse -File -Filter 'msixmgr.exe' | Where-Object { $_.FullName -match '[\\/]x64[\\/]' })
+          if ($executables.Count -ne 1) { throw "Expected one x64 MSIXMGR executable; found $($executables.Count)." }
+          $output = Join-Path $env:RUNNER_TEMP 'app-attach'
+          New-Item -ItemType Directory -Path $output -Force | Out-Null
+          $image = Join-Path $output 'XmlNotepad.vhdx'
+          & $executables[0].FullName -Unpack -packagePath $bundle.FullName -destination $image -applyACLs -create -fileType vhdx -rootDirectory apps -quietUX
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $image)) { throw 'MSIXMGR did not create the VHDX image.' }
+          if ((Get-Item -LiteralPath $image).Length -eq 0) { throw 'MSIXMGR produced an empty VHDX image.' }
+          Copy-Item -LiteralPath $bundle.FullName -Destination $output
+          Get-ChildItem $output -File | ForEach-Object {
+            '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash, $_.Name
+          } | Set-Content -Path (Join-Path $output 'SHA256SUMS.txt')
+          "path=$output" >> $env:GITHUB_OUTPUT
+
+      - name: Upload signed bundle and App Attach image
+        uses: actions/upload-artifact@v4
+        with:
+          name: xmlnotepad-app-attach-${{ github.sha }}
+          path: ${{ steps.image.outputs.path }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
