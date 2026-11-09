@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   package-and-image:
-    runs-on: windows-2022
+    runs-on: windows-2025
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -65,7 +65,7 @@ jobs:
           msbuild .\src\XmlNotepadPackage\XmlNotepadPackage.wapproj /t:Build /p:Configuration=Release /p:Platform=AnyCPU /p:GenerateAppxPackageOnBuild=true /p:AppxBundle=Always /p:UapAppxPackageBuildMode=SideloadOnly /p:AppxPackageSigningEnabled=true "/p:PackageCertificateThumbprint=$env:MSIX_CERT_THUMBPRINT" /verbosity:minimal
           if ($LASTEXITCODE -ne 0) { throw 'MSIX package build failed.' }
 
-      - name: Create App Attach VHDX from signed MSIX bundle
+      - name: Create App Attach CIM from signed MSIX bundle
         id: image
         shell: pwsh
         run: |
@@ -73,9 +73,25 @@ jobs:
           $bundles = @(Get-ChildItem 'src/XmlNotepadPackage/AppPackages' -Recurse -File -Filter '*.msixbundle')
           if ($bundles.Count -ne 1) { throw "Expected one MSIX bundle; found $($bundles.Count)." }
           $bundle = $bundles[0]
+          $certificate = Get-Item "Cert:\CurrentUser\My\$env:MSIX_CERT_THUMBPRINT"
           $signature = Get-AuthenticodeSignature -LiteralPath $bundle.FullName
-          if (-not $signature.SignerCertificate -or $signature.SignerCertificate.Thumbprint -ne $env:MSIX_CERT_THUMBPRINT) {
+          if (-not $signature.SignerCertificate -or $signature.SignerCertificate.Thumbprint -ne $certificate.Thumbprint) {
             throw 'The produced bundle is not signed with the configured certificate.'
+          }
+          $archive = [IO.Compression.ZipFile]::OpenRead($bundle.FullName)
+          try {
+            $entry = $archive.GetEntry('AppxMetadata/AppxBundleManifest.xml')
+            if (-not $entry) { throw 'The signed bundle has no bundle manifest.' }
+            $reader = [IO.StreamReader]::new($entry.Open())
+            try { [xml]$bundleManifest = $reader.ReadToEnd() }
+            finally { $reader.Dispose() }
+          }
+          finally { $archive.Dispose() }
+          [xml]$sourceManifest = Get-Content -LiteralPath 'src/XmlNotepadPackage/Package.appxmanifest' -Raw
+          if ($bundleManifest.Bundle.Identity.Publisher -cne $certificate.Subject -or
+              $bundleManifest.Bundle.Identity.Name -cne $sourceManifest.Package.Identity.Name -or
+              $bundleManifest.Bundle.Identity.Version -cne $sourceManifest.Package.Identity.Version) {
+            throw 'The signed bundle identity differs from the configured publisher or source manifest.'
           }
           $zip = Join-Path $env:RUNNER_TEMP 'msixmgr.zip'
           $tools = Join-Path $env:RUNNER_TEMP 'msixmgr'
@@ -84,18 +100,55 @@ jobs:
           $executables = @(Get-ChildItem $tools -Recurse -File -Filter 'msixmgr.exe' | Where-Object { $_.FullName -match '[\\/]x64[\\/]' })
           if ($executables.Count -ne 1) { throw "Expected one x64 MSIXMGR executable; found $($executables.Count)." }
           $output = Join-Path $env:RUNNER_TEMP 'app-attach'
-          New-Item -ItemType Directory -Path $output -Force | Out-Null
-          $image = Join-Path $output 'XmlNotepad.vhdx'
-          & $executables[0].FullName -Unpack -packagePath $bundle.FullName -destination $image -applyACLs -create -fileType vhdx -rootDirectory apps
-          if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $image)) { throw 'MSIXMGR did not create the VHDX image.' }
-          if ((Get-Item -LiteralPath $image).Length -eq 0) { throw 'MSIXMGR produced an empty VHDX image.' }
+          $cimDirectory = Join-Path $output 'appattach'
+          New-Item -ItemType Directory -Path $cimDirectory -Force | Out-Null
+          $image = Join-Path $cimDirectory 'XmlNotepad.cim'
+          & $executables[0].FullName -Unpack -packagePath $bundle.FullName -destination $image -applyACLs -create -fileType CIM -rootDirectory apps
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $image -PathType Leaf)) { throw 'MSIXMGR did not create the CIM image.' }
+          $files = @(Get-ChildItem -LiteralPath $cimDirectory -File)
+          $companions = @($files | Where-Object { $_.Name -ne 'XmlNotepad.cim' })
+          $ids = @($companions | ForEach-Object {
+            $match = [regex]::Match($_.Name, '^(objectid|region)_([0-9a-fA-F-]{36})_(\d+)$')
+            if (-not $match.Success) { throw "Unexpected CIM companion: $($_.Name)" }
+            $match.Groups[2].Value.ToLowerInvariant()
+          } | Select-Object -Unique)
+          if ($ids.Count -ne 1 -or @($companions | Where-Object Name -Like 'objectid_*').Count -eq 0 -or
+              @($companions | Where-Object Name -Like 'region_*').Count -eq 0) {
+            throw 'The CIM descriptor must have both objectid and region companions with one identifier.'
+          }
+          $descriptor = [IO.File]::ReadAllBytes($image)
+          if ($descriptor.Length -lt 48 -or [Text.Encoding]::ASCII.GetString($descriptor, 0, 8) -ne 'cimfile0' -or
+              ([Guid]::new([byte[]]$descriptor[32..47])).ToString() -ne $ids[0]) {
+            throw 'The CIM descriptor does not match its companion files.'
+          }
+          if (@($files | Where-Object Length -EQ 0).Count -gt 0) { throw 'A CIM file is empty.' }
+          $objectIds = @($companions | Where-Object Name -Like 'objectid_*' | ForEach-Object { $_.Name.Split('_')[-1] } | Sort-Object)
+          $regions = @($companions | Where-Object Name -Like 'region_*' | ForEach-Object { $_.Name.Split('_')[-1] } | Sort-Object)
+          if (@(Compare-Object $objectIds $regions).Count -gt 0) { throw 'CIM objectid and region indexes differ.' }
           Copy-Item -LiteralPath $bundle.FullName -Destination $output
-          Get-ChildItem $output -File | ForEach-Object {
-            '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash, $_.Name
+          Get-ChildItem $output -Recurse -File | ForEach-Object {
+            '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash, $_.FullName.Substring($output.Length + 1).Replace('\', '/')
           } | Set-Content -Path (Join-Path $output 'SHA256SUMS.txt')
           "path=$output" >> $env:GITHUB_OUTPUT
+          "cim=$image" >> $env:GITHUB_OUTPUT
+          "msixmgr=$($executables[0].FullName)" >> $env:GITHUB_OUTPUT
+          "publisher=$($certificate.Subject)" >> $env:GITHUB_OUTPUT
+          "packageName=$($sourceManifest.Package.Identity.Name)" >> $env:GITHUB_OUTPUT
 
-      - name: Upload signed bundle and App Attach image
+      - name: Validate CIM staging and package folder ACLs
+        shell: powershell
+        env:
+          CIM_PATH: ${{ steps.image.outputs.cim }}
+          MSIXMGR_PATH: ${{ steps.image.outputs.msixmgr }}
+          PACKAGE_PUBLISHER: ${{ steps.image.outputs.publisher }}
+          PACKAGE_NAME: ${{ steps.image.outputs.packageName }}
+        run: |
+          & .\.github\scripts\test-cim-stage.ps1 -ImagePath $env:CIM_PATH `
+            -MsixMgrPath $env:MSIXMGR_PATH `
+            -ExpectedPublisher $env:PACKAGE_PUBLISHER `
+            -ExpectedPackageName $env:PACKAGE_NAME
+
+      - name: Upload signed bundle and complete App Attach CIM
         uses: actions/upload-artifact@v4
         with:
           name: xmlnotepad-app-attach-${{ github.sha }}
