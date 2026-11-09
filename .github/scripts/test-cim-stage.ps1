@@ -13,7 +13,21 @@ $before = @(Get-Volume | ForEach-Object { $_.UniqueId })
 $mounted = $false
 $staged = $false
 $packageFullName = $null
+$addedTrust = $false
+$trustedCertificate = "Cert:\LocalMachine\TrustedPeople\$env:MSIX_CERT_THUMBPRINT"
 try {
+    $signer = Get-Item -LiteralPath "Cert:\CurrentUser\My\$env:MSIX_CERT_THUMBPRINT"
+    if ($signer.Subject -cne $ExpectedPublisher) { throw 'The signing certificate does not match the bundle publisher.' }
+    if (-not (Test-Path -LiteralPath $trustedCertificate)) {
+        $publicCertificate = Join-Path $env:RUNNER_TEMP 'xmlnotepad-public-signing.cer'
+        try {
+            Export-Certificate -Cert $signer -FilePath $publicCertificate | Out-Null
+            Import-Certificate -FilePath $publicCertificate -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople' | Out-Null
+            $addedTrust = $true
+        }
+        finally { Remove-Item -LiteralPath $publicCertificate -ErrorAction SilentlyContinue }
+    }
+
     $mountOutput = @(& $MsixMgrPath -MountImage -imagePath $ImagePath -fileType CIM 2>&1)
     if ($LASTEXITCODE -ne 0) { throw "Failed to mount the new CIM image: $($mountOutput -join ' ')" }
     $mounted = $true
@@ -73,11 +87,16 @@ try {
     Write-Output "Successfully staged $packageFullName from $ImagePath"
 }
 finally {
-    if ($staged) {
-        Remove-AppxPackage -AllUsers -Package $packageFullName -ErrorAction SilentlyContinue
+    try {
+        if ($staged) {
+            Remove-AppxPackage -AllUsers -Package $packageFullName -ErrorAction SilentlyContinue
+        }
+        if ($mounted) {
+            & $MsixMgrPath -UnmountImage -imagePath $ImagePath -fileType CIM
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to unmount the CI test CIM image.' }
+        }
     }
-    if ($mounted) {
-        & $MsixMgrPath -UnmountImage -imagePath $ImagePath -fileType CIM
-        if ($LASTEXITCODE -ne 0) { throw 'Failed to unmount the CI test CIM image.' }
+    finally {
+        if ($addedTrust) { Remove-Item -LiteralPath $trustedCertificate -ErrorAction Stop }
     }
 }
