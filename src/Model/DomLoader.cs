@@ -215,6 +215,12 @@ namespace XmlNotepad
             }
         }
 
+        private static bool SkipNonContentNode(XmlNodeType nodeType, bool preserveWhitespace)
+        {
+            return nodeType == XmlNodeType.Comment ||
+                (nodeType == XmlNodeType.Whitespace && !preserveWhitespace);
+        }
+
         private void LoadDocument()
         {
             bool preserveWhitespace = this._doc.PreserveWhitespace;
@@ -223,6 +229,11 @@ namespace XmlNotepad
             XmlElement element;
             while (r.Read())
             {
+                if (SkipNonContentNode(r.NodeType, preserveWhitespace))
+                {
+                    continue;
+                }
+
                 XmlNode node = null;
                 switch (r.NodeType)
                 {
@@ -279,16 +290,10 @@ namespace XmlNotepad
                         break;
 
                     case XmlNodeType.Whitespace:
-                        if (preserveWhitespace)
-                        {
-                            node = _doc.CreateWhitespace(r.Value);
-                            AddToTable(node);
-                            break;
-                        }
-                        else
-                        {
-                            continue;
-                        }
+                        node = _doc.CreateWhitespace(r.Value);
+                        AddToTable(node);
+                        break;
+
                     case XmlNodeType.CDATA:
                         node = _doc.CreateCDataSection(r.Value);
                         AddToTable(node);

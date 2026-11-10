@@ -66,6 +66,14 @@ namespace XmlNotepad.Model.Tests
         }
 
         [TestMethod]
+        public void OpeningDocumentWithoutPreservedWhitespaceOmitsWhitespaceNodes()
+        {
+            LoadXml("<root>\n  <item />\n</root>");
+
+            Assert.AreEqual(1, _model.Document.DocumentElement!.ChildNodes.Count);
+        }
+
+        [TestMethod]
         [DataRow("noNamespaceSchemaLocation", NetworkSchemaLocation)]
         [DataRow("schemaLocation", NetworkSchemaLocation)]
         [DataRow("noNamespaceSchemaLocation", NetworkFileUri)]
