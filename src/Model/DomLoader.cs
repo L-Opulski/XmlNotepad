@@ -217,8 +217,7 @@ namespace XmlNotepad
 
         private static bool SkipNonContentNode(XmlNodeType nodeType, bool preserveWhitespace)
         {
-            return nodeType == XmlNodeType.Comment ||
-                (nodeType == XmlNodeType.Whitespace && !preserveWhitespace);
+            return nodeType == XmlNodeType.Whitespace && !preserveWhitespace;
         }
 
         private void LoadDocument()

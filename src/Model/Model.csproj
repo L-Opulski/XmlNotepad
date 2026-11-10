@@ -38,7 +38,9 @@
   </ItemGroup>
 
   <Target Name="PreBuild" BeforeTargets="PreBuildEvent">
-    <Exec Command="echo namespace XmlNotepad { public partial class AppAnalytics { private const string ApiKey=&quot;%25XMLNOTEPAD_ANALYTICSKEY%25&quot;; } } &gt; $(MSBuildThisFileDirectory)ApiKey.cs " />
+    <WriteLinesToFile File="$(MSBuildThisFileDirectory)ApiKey.cs"
+      Lines="namespace XmlNotepad { public partial class AppAnalytics { private const string ApiKey=&quot;$(XMLNOTEPAD_ANALYTICSKEY)&quot;%3B } }"
+      Overwrite="true" />
   </Target>
 
 </Project>

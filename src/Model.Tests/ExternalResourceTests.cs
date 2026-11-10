@@ -74,6 +74,26 @@ namespace XmlNotepad.Model.Tests
         }
 
         [TestMethod]
+        [DataRow(false)]
+        [DataRow(true)]
+        public void OpeningDocumentPreservesComments(bool preserveWhitespace)
+        {
+            _settings["PreserveWhitespace"] = preserveWhitespace;
+            const string xml = "<demo>\n  <!-- This comment must stay visible -->\n  <item>working</item>\n</demo>";
+            using (var text = new StringReader(xml))
+            using (var reader = XmlReader.Create(text, _model.GetReaderSettings(), new Uri(_documentFile).AbsoluteUri))
+            {
+                _model.Load(reader, _documentFile);
+            }
+
+            var comment = _model.Document.SelectSingleNode("/demo/comment()");
+            Assert.IsNotNull(comment);
+            Assert.AreEqual(" This comment must stay visible ", comment.Value);
+            Assert.AreEqual("item", comment.SelectSingleNode("following-sibling::*[1]")?.LocalName);
+            Assert.AreEqual("working", comment.SelectSingleNode("following-sibling::*[1]")?.InnerText);
+        }
+
+        [TestMethod]
         [DataRow("noNamespaceSchemaLocation", NetworkSchemaLocation)]
         [DataRow("schemaLocation", NetworkSchemaLocation)]
         [DataRow("noNamespaceSchemaLocation", NetworkFileUri)]
